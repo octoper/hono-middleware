@@ -1,13 +1,15 @@
-import type { ClerkOptions } from '@clerk/backend'
-import { Clerk, createIsomorphicRequest, constants } from '@clerk/backend'
+import { createClerkClient, type ClerkOptions } from '@clerk/backend'
+import type { ClerkClient } from '@clerk/backend'
+import { AuthStatus, constants } from '@clerk/backend/internal'
 import type { Context, MiddlewareHandler } from 'hono'
 import { env } from 'hono/adapter'
+import { createMiddleware } from 'hono/factory'
 
-type ClerkAuth = Awaited<ReturnType<ReturnType<typeof Clerk>['authenticateRequest']>>['toAuth']
+type ClerkAuth = Awaited<ReturnType<ClerkClient['authenticateRequest']>>['toAuth']
 
 declare module 'hono' {
   interface ContextVariableMap {
-    clerk: ReturnType<typeof Clerk>
+    clerk: ClerkClient
     clerkAuth: ReturnType<ClerkAuth>
   }
 }
@@ -21,11 +23,10 @@ type ClerkEnv = {
   CLERK_PUBLISHABLE_KEY: string
   CLERK_API_URL: string
   CLERK_API_VERSION: string
-  CLERK_FRONTEND_API: string
 }
 
 export const clerkMiddleware = (options?: ClerkOptions): MiddlewareHandler => {
-  return async (c, next) => {
+  return createMiddleware(async (c, next) => {
     const clerkEnv = env<ClerkEnv>(c)
     const { secretKey, publishableKey, apiUrl, apiVersion, ...rest } = options || {
       secretKey: clerkEnv.CLERK_SECRET_KEY || '',
@@ -33,7 +34,9 @@ export const clerkMiddleware = (options?: ClerkOptions): MiddlewareHandler => {
       apiUrl: clerkEnv.CLERK_API_URL || 'https://api.clerk.dev',
       apiVersion: clerkEnv.CLERK_API_VERSION || 'v1',
     }
-    const frontendApi = clerkEnv.CLERK_FRONTEND_API || ''
+
+    console.log('hono clerk secret', secretKey, publishableKey)
+
     if (!secretKey) {
       throw new Error('Missing Clerk Secret key')
     }
@@ -42,7 +45,7 @@ export const clerkMiddleware = (options?: ClerkOptions): MiddlewareHandler => {
       throw new Error('Missing Clerk Publishable key')
     }
 
-    const clerkClient = Clerk({
+    const clerkClient = createClerkClient({
       ...rest,
       apiUrl,
       apiVersion,
@@ -50,40 +53,29 @@ export const clerkMiddleware = (options?: ClerkOptions): MiddlewareHandler => {
       publishableKey,
     })
 
-    const requestState = await clerkClient.authenticateRequest({
+    const requestState = await clerkClient.authenticateRequest(c.req.raw, {
       ...rest,
       secretKey,
       publishableKey,
-      request: createIsomorphicRequest((Request) => {
-        return new Request(c.req.url, {
-          method: c.req.method,
-          headers: c.req.raw.headers,
-        })
-      }),
     })
+    requestState.headers.forEach((value, key) => c.header(key, value))
 
-    // Interstitial cases
-    if (requestState.isUnknown) {
-      c.header(constants.Headers.AuthReason, requestState.reason)
-      c.header(constants.Headers.AuthMessage, requestState.message)
-      return c.body(null, 401)
-    }
+    const locationHeader = c.req.header(constants.Headers.Location)
 
-    if (requestState.isInterstitial) {
-      const interstitialHtmlPage = clerkClient.localInterstitial({
-        publishableKey,
-        frontendApi,
-      })
+    if (locationHeader) {
+      const authReason = requestState.reason || undefined
+      c.header(constants.Headers.AuthStatus, requestState.status)
+      c.header(constants.Headers.AuthReason, authReason)
+      c.header(constants.Headers.AuthStatus, requestState.status)
 
-      c.header(constants.Headers.AuthReason, requestState.reason)
-      c.header(constants.Headers.AuthMessage, requestState.message)
-
-      return c.html(interstitialHtmlPage, 401)
+      c.redirect(locationHeader, 307)
+    } else if (requestState.status === AuthStatus.Handshake) {
+      throw new Error('Clerk: handshake status without redirect')
     }
 
     c.set('clerkAuth', requestState.toAuth())
     c.set('clerk', clerkClient)
 
     await next()
-  }
+  })
 }

@@ -6,7 +6,6 @@ module.exports = {
   transform: { '^.+\\.m?tsx?$': 'ts-jest' },
   testPathIgnorePatterns: ['/node_modules/', '/jest/'],
   moduleNameMapper: {
-    '#crypto': '@clerk/backend/dist/runtime/node/crypto.js',
     '#fetch': '@clerk/backend/dist/runtime/node/fetch.js',
   },
 }
